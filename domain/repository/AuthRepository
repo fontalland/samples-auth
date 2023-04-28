@@ -1,0 +1,48 @@
+//
+//  AuthRepository.swift
+//  FinApp
+//
+//  Created by Leandro D' Fontalland on 09/02/2022.
+//
+
+import Foundation
+import LocalAuthentication
+
+protocol AuthRepository {
+    
+    typealias LoginCompletion = (Result<LoginResult, Error>) -> Void
+    typealias LogoutCompletion = (Error?) -> Void
+    typealias RefreshTokenCompletion = (Result<LoginResult, Error>) -> Void
+    typealias ForgotPasswordCompletion = (Error?) -> Void
+    typealias ResetPasswordCompletion = (Error?) -> Void
+    typealias AuthenticationWithBiometricCompletion = (Result<Bool, Error>) -> Void
+    
+    var availableBiometricType: LABiometryType { get }
+    var deviceHasBiometrics: Bool { get }
+    var canLoginWithBiometrics: Bool { get }
+    var currentUser: User? { get }
+    var isLogged: Bool { get }
+    var token: String { get }
+    var userSettings: UserSettings? { get }
+
+    func login(username: String, password: String, completion: @escaping LoginCompletion)
+    func loginWithFaceId(completion: @escaping AuthenticationWithBiometricCompletion)
+    func loginWithTouchId(completion: @escaping AuthenticationWithBiometricCompletion)
+    func register(registerObj: String, completion: @escaping LoginCompletion)
+    func forgotPassword(email: String, completion: @escaping ForgotPasswordCompletion)
+    func resetPassword(oldPassword: String, newPassword: String, completion: @escaping ResetPasswordCompletion)
+    func saveSessionForBiometricsAuth()
+    func refreshToken(completion: @escaping RefreshTokenCompletion)
+    func logout()    
+}
+
+enum AuthError: Error {
+    
+    // Throw when credentials are not found on authenticate with biometrics
+    case credentialsNotAvailable
+    
+    case decodeError
+    
+    // Throw in all other cases
+    case unexpected(code: Int)
+}
