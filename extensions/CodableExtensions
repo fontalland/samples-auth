@@ -1,0 +1,95 @@
+//
+//  baseModel.swift
+//  FDG
+//
+//  Created by Leandro D' Fontalland on 12/09/19.
+//  Copyright © 2019 fonttech.com. All rights reserved.
+//
+
+import Foundation
+
+extension Encodable {
+     
+    func toData() -> Data? {
+        return encodeGenericToData(self)
+    }
+}
+
+extension Decodable {
+    static func fromData(_ data: Data, withUserInfo userInfo: [CodingUserInfoKey : Any]? = nil, completion: @escaping (Self?) -> ()) {
+        if let obj: Self = decodeGenericFromData(data, withUserInfo: userInfo) {
+            completion(obj)
+        }
+    }
+    static func fromData(_ data: Data, withUserInfo userInfo: [CodingUserInfoKey : Any]? = nil) -> Self? {
+        let obj: Self? = decodeGenericFromData(data, withUserInfo: userInfo)
+        return obj
+    }
+    static func fromDictionary(_ dictionary: [String:Any], withUserInfo userInfo: [CodingUserInfoKey : Any]? = nil) -> Self? {
+        if let data = try? JSONSerialization.data(withJSONObject: dictionary, options: []) {
+            return Self.fromData(data, withUserInfo: userInfo)
+        }
+        return nil
+    }
+    static func fromArray(_ array: [[String:Any]], withUserInfo userInfo: [CodingUserInfoKey : Any]? = nil) -> Self? {
+        if let data = try? JSONSerialization.data(withJSONObject: array, options: []) {
+            return Self.fromData(data, withUserInfo: userInfo)
+        }
+        return nil
+    }
+}
+
+fileprivate func encodeGenericToData<T: Encodable>(_ encodable: T) -> Data? {
+    do {
+        let encoder = JSONEncoder()
+        //encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.keyEncodingStrategy = .custom({ (keys) -> CodingKey in
+            let lastKey = keys.last!
+            guard lastKey.intValue == nil else { return lastKey }
+            let keyString = lastKey.stringValue
+            if keyString != "id" && keyString.hasSuffix("Id") {
+                let newStringValue = "\(keyString.dropLast(2))_id"
+                return AnyKey(stringValue: newStringValue)!
+            }
+            return lastKey
+        })
+        return try encoder.encode(encodable)
+    } catch let error {
+#if DEBUG
+        preconditionFailure("Failed to ready \(type(of: encodable)) from data: \(error)")
+#else
+        return nil
+#endif
+    }
+}
+
+fileprivate func decodeGenericFromData<T: Decodable>(_ data: Data, withUserInfo userInfo: [CodingUserInfoKey : Any]? = nil) -> T? {
+    do {
+        let decoder = JSONDecoder()
+        if let userInfo = userInfo {
+            decoder.userInfo = userInfo
+        }
+        decoder.keyDecodingStrategy = JSONDecoder.KeyDecodingStrategy.convertFromSnakeCase
+        return try decoder.decode(T.self, from: data)
+    } catch let error {
+#if DEBUG
+        debugPrint("ERROR decoding data: \(String(data: data, encoding: .utf8) ?? "can't read the data.") ===== ERROR: \(error)")
+        // preconditionFailure("Failed to ready \(T.self) from data: \(error)")
+#endif
+        return nil
+    }
+}
+
+struct AnyKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+    
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+    }
+    
+    init?(intValue: Int) {
+        self.stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
