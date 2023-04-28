@@ -1,0 +1,182 @@
+//
+//  AuthRepository.swift
+//  FinApp
+//
+//  Created by Leandro D' Fontalland on 09/02/2022.
+//
+
+import Foundation
+import LocalAuthentication
+
+class AuthRepositoryImpl: BaseService, AuthRepository {
+
+    var currentUser: User? {
+        authSession?.user ?? nil
+    }
+    
+    var isLogged: Bool {
+        authSession != nil
+    }
+    
+    var token: String {
+        authSession?.token ?? ""
+    }
+    
+    var userSettings: UserSettings? {
+        authSession?.settings
+    }
+    
+    private var api: AuthApiBusinessLogic
+    // Context for Biometrics
+    private lazy var localAuthenticationContext = LAContext()
+    private var authSession: AuthSession?
+    
+    init(authApi: AuthApiBusinessLogic) {
+        self.api  = authApi
+    }
+    
+    func login(username: String, password: String, completion: @escaping LoginCompletion)
+    {
+        api.login(username: username, password: password) { result in
+            switch result {
+                case .success(let loginResult):
+                    self.getSessionAfterLogin(loginResult: loginResult) { sessionResult in
+                        switch sessionResult {
+                            case .failure(let err):
+                                completion(.failure(err))
+                            case .success(_):
+                                completion(result)
+                        }
+                    }
+                    break
+                default:
+                    completion(result)
+                    break
+            }
+        }
+    }
+    
+    func loginWithFaceId(completion: @escaping AuthenticationWithBiometricCompletion) {
+        guard availableBiometricType == .faceID else { return }
+        self.loginWithBiometric(reason: "Log in with Face ID", fallbackTitle: "Face Not Recognized", completion: completion)
+    }
+    
+    func loginWithTouchId(completion: @escaping AuthenticationWithBiometricCompletion) {
+        guard availableBiometricType == .touchID else { return }
+        self.loginWithBiometric(reason: "Authentication required to access the secure data", fallbackTitle: "Please use your Fingerprint", completion: completion)
+    }
+    
+    private func loginWithBiometric(reason: String, fallbackTitle: String, completion: @escaping AuthenticationWithBiometricCompletion) {
+        var authorizationError: NSError?
+//        localAuthenticationContext.localizedFallbackTitle = fallbackTitle
+        if localAuthenticationContext.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &authorizationError) {
+            localAuthenticationContext.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { success, evaluateError in
+                guard success, evaluateError == nil else {
+                    DispatchQueue.main.async() {
+                        completion(.failure(evaluateError!))
+                    }
+                    return
+                }
+                
+                if let authObj = UserDefaults.standard.object(forKey: ConstKeys.AUTH_OBJECT) as? [String: String] {
+                    guard let token = authObj["tk"], let refreshToken = authObj["rtk"] else {
+                        return completion(.failure(AuthError.credentialsNotAvailable))
+                    }
+                    
+                    //TODO: WE HAVE A USER IN THE AUTH OBJECT SO WE DON'T NEED THIS FAKE ONE
+                    let loginResult = LoginResult(token: token, refreshToken: refreshToken, user: User(id: "tempFake", name: "internal", email: "internal", verified: false, roles: []))
+                    self.getSessionAfterLogin(loginResult: loginResult) { result in
+                        completion(result)
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Can not use. We actually should not show the option
+            guard let error = authorizationError else {
+                return
+            }
+            completion(.failure(error))
+        }
+    }
+
+    private func getSessionAfterLogin(loginResult: LoginResult, completion: @escaping (Result<Bool, Error>) -> Void) {
+        self.authSession = AuthSession(token: loginResult.token, refreshToken: loginResult.refreshToken, user: loginResult.user, settings: UserSettings(defaultWalletId: ""))
+        self.api.getSession { result in
+            switch result {
+                case .failure(let error):
+                    self.authSession = nil
+                    completion(.failure(error))
+                case .success(let sessionResult):
+                    self.authSession = AuthSession(token: loginResult.token, refreshToken: loginResult.refreshToken, user: sessionResult.user, settings: sessionResult.settings)
+                    if WalletManager.sharedInstance.currentWalletId.isEmpty {
+                        WalletManager.sharedInstance.currentWalletId = sessionResult.settings.defaultWalletId
+                    }
+                    completion(.success(true))
+            }
+        }
+    }
+    
+    func register(registerObj: String, completion: @escaping LoginCompletion)
+    {
+        
+    }
+    
+    func refreshToken(completion: @escaping RefreshTokenCompletion) {
+        guard let refreshToken = authSession?.refreshToken else {
+            return
+        }
+        api.refreshToken(refreshToken: refreshToken) { result in
+            switch result {
+                case .failure(let error):
+                    completion(.failure(error))
+                case .success(let loginResult):
+                    self.getSessionAfterLogin(loginResult: loginResult) { sessionResult in
+                        switch sessionResult {
+                            case .failure(let error):
+                                completion(.failure(error))
+                            case .success(_):
+                                self.saveSessionForBiometricsAuth()
+                                completion(.success(loginResult))
+                        }
+                    }
+            }
+        }
+    }
+    
+    func logout() {
+        //TODO: CALL THE API TO INVALIDATE THE TOKEN
+        self.authSession = nil
+    }
+    
+    func forgotPassword(email: String, completion: @escaping ForgotPasswordCompletion)
+    {
+        
+    }
+    
+    func resetPassword(oldPassword: String, newPassword: String, completion: @escaping ResetPasswordCompletion)
+    {
+        
+    }
+    
+    var deviceHasBiometrics: Bool {
+        localAuthenticationContext.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+    }
+    
+    var canLoginWithBiometrics: Bool {
+        if self.deviceHasBiometrics {
+            return UserDefaults.standard.bool(forKey: ConstKeys.BIOMETRIC_LOGIN) && UserDefaults.standard.object(forKey: ConstKeys.AUTH_OBJECT) != nil
+        }
+        return false
+    }
+    
+    var availableBiometricType: LABiometryType {
+        self.canLoginWithBiometrics ? localAuthenticationContext.biometryType : .none
+    }
+    
+    func saveSessionForBiometricsAuth() {
+        UserDefaults.standard.set(["tk": self.token, "rtk": self.authSession?.refreshToken], forKey: ConstKeys.AUTH_OBJECT)
+        UserDefaults.standard.set(true, forKey: ConstKeys.BIOMETRIC_LOGIN)
+    }
+}
