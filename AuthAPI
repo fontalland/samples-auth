@@ -1,0 +1,87 @@
+//
+//  AuthApi.swift
+//  FinApp
+//
+//  Created by Leandro D' Fontalland on 08/06/22.
+//
+
+import Foundation
+
+protocol AuthApiBusinessLogic {
+    func login(username: String, password: String, completion: @escaping AuthRepository.LoginCompletion)
+    func logout(completion: @escaping AuthRepository.LogoutCompletion)
+    func getSession(completion: @escaping (Result<SessionResult, Error>) -> Void)
+    func refreshToken(refreshToken: String, completion: @escaping AuthRepository.RefreshTokenCompletion)
+}
+
+class AuthApi: BaseService, AuthApiBusinessLogic {
+    
+    func login(username: String, password: String, completion: @escaping AuthRepository.LoginCompletion) {
+        completion(.failure(NSError(domain: "WRONG API", code: 402)))
+        return
+        guard let url = URL(string: LOGIN_URL) else { return }
+                
+        let body = [
+            "email": username,
+            "password": password
+        ]
+        
+        postRequest(withUrl: url, params: body) { result in
+            switch result {
+                case .failure(let err):
+                    completion(.failure(err))
+                    break
+                case .success(let data):
+                    if let loginResult = LoginResult.fromData(data) {
+                        completion(.success(loginResult))
+                    } else {
+                        completion(.failure(AuthError.decodeError))
+                    }
+                    break
+            }
+        }
+    }
+    
+    func logout(completion: @escaping AuthRepository.LogoutCompletion) {
+        
+    }
+    
+    func getSession(completion: @escaping (Result<SessionResult, Error>) -> Void) {
+        guard let url = URL(string: GET_SESSION_URL) else { return }
+        getRequest(withUrl: url) { result in
+            switch result {
+                case .failure(let error):
+                    completion(.failure(error))
+                case .success(let data):
+                    if let sessionResult = ServerResponse<SessionResult>.fromData(data)?.item {
+                        completion(.success(sessionResult))
+                    } else {
+                        completion(.failure(AuthError.decodeError))
+                    }
+            }
+        }
+    }
+    
+    func refreshToken(refreshToken: String, completion: @escaping AuthRepository.RefreshTokenCompletion) {
+        guard let url = URL(string: REFRESH_TOKEN_URL) else { return }
+        
+        let body = [
+            "refreshToken": refreshToken
+        ]
+        
+        postRequest(withUrl: url, params: body) { result in
+            switch result {
+                case .failure(let err):
+                    completion(.failure(err))
+                    break
+                case .success(let data):
+                    if let result = LoginResult.fromData(data) {
+                        completion(.success(result))
+                    } else {
+                        completion(.failure(AuthError.decodeError))
+                    }
+                    break
+            }
+        }
+    }
+}
