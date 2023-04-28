@@ -1,0 +1,582 @@
+//
+//  baseService.swift
+//  FontTech
+//
+//  Created by Leandro D' Fontalland on 23/08/21.
+//  Copyright © 2021 fonttech.com. All rights reserved.
+//
+
+import Foundation
+import UIKit
+
+public enum HTTPMethod: String {
+    case options = "OPTIONS"
+    case get     = "GET"
+    case head    = "HEAD"
+    case post    = "POST"
+    case put     = "PUT"
+    case patch   = "PATCH"
+    case delete  = "DELETE"
+    case trace   = "TRACE"
+    case connect = "CONNECT"
+}
+
+extension URLRequest {
+    
+    private func percentEscapeString(_ string: String) -> String {
+        var characterSet = CharacterSet.alphanumerics
+        characterSet.insert(charactersIn: "-._* ")
+        
+        return string
+            .addingPercentEncoding(withAllowedCharacters: characterSet)!
+            .replacingOccurrences(of: " ", with: "+")
+            .replacingOccurrences(of: " ", with: "+", options: [], range: nil)
+    }
+    
+    mutating func encodeParameters(parameters: [String : String]) {
+        httpMethod = "POST"
+        
+        let parameterArray = parameters.map { (arg) -> String in
+            let (key, value) = arg
+            return "\(key)=\(self.percentEscapeString(value))"
+        }
+        
+        httpBody = parameterArray.joined(separator: "&").data(using: String.Encoding.utf8)
+    }
+}
+
+class BaseService {
+    
+    typealias BaseServiceCompletion = (Result<Data, Error>) -> Void
+    typealias BaseServiceRequestParams = Data
+    
+    enum RequestError: Error {
+        
+        // Throw when the auth token gets expired and we need to refresh it.
+        case REFRESH_TOKEN
+        
+        // Throw when we have a problem decoding a model.
+        case DECODE
+        
+        case ENCODE
+        
+        case UNKNOWN
+        
+        case INVALID_URL
+    }
+    
+    //static internal var authToken: AuthToken?
+    
+    internal func prepareFormData(params: [String:Any], fileKey: String, filename: String, fileData: Data, mimeType: String) -> (data: Data, boundary: String) {
+        // generate boundary string using a unique per-app string
+        let boundary = UUID().uuidString
+        var body = Data()
+        
+        for (key, value) in params
+        {
+            body.append(Data("--\(boundary)\r\n".utf8))
+            body.append(Data("Content-Disposition: form-data; name=\"\(key)\"\r\n\r\n".utf8))
+            body.append(Data("\(value)\r\n".utf8))
+        }
+        
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"\(fileKey)\"; filename=\"\(filename)\"\r\n".utf8))
+        body.append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
+        body.append(fileData)
+        body.append(Data("\r\n".utf8))
+        body.append(Data("--\(boundary)--\r\n".utf8))
+        
+        return (body, boundary)
+    }
+    
+    internal func getExternalRequest(withUrl url: URL, completion: @escaping BaseServiceCompletion) {
+        var request = URLRequest(url: url)
+        request.httpMethod = HTTPMethod.get.rawValue
+        executeRequest(request, completion: completion)
+    }
+    
+    internal func getRequest(withUrl url: URL, completion: @escaping BaseServiceCompletion) {
+        let request = createRequest(withUrl: url, forMethod: .get)
+        executeRequest(request, completion: completion)
+    }
+    
+    internal func getRequest(withUrl url: URL, query: [String:String], completion: @escaping BaseServiceCompletion) {
+        var preparedUrl = url
+        if var components = URLComponents(string: url.absoluteString) {
+            components.queryItems = query.map { param in
+                URLQueryItem(name: param.key, value: "\(param.value)")
+            }
+            preparedUrl = components.url!
+        }
+        getRequest(withUrl: preparedUrl, completion: completion)
+    }
+    
+    internal func postRequest(withUrl url: URL, params: [String:Any], completion: @escaping BaseServiceCompletion) {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: params, options: .prettyPrinted) // pass dictionary to data object and set it as request body
+            postRequest(withUrl: url, data: data, completion: completion)
+        } catch let error {
+            print(error.localizedDescription)
+            completion(.failure(error))
+        }
+    }
+    
+    internal func postRequest(withUrl url: URL, item: Encodable, completion: @escaping BaseServiceCompletion) {
+        guard let data = item.toData() else {
+            completion(.failure(RequestError.ENCODE))
+            return
+        }
+        postRequest(withUrl: url, data: data, completion: completion)
+    }
+    
+    internal func postRequest(withUrl url: URL, data: Data, completion: @escaping BaseServiceCompletion) {
+        var request = createRequest(withUrl: url, forMethod: .post)
+        request.httpBody = data
+        
+        executeRequest(request, completion: completion)
+    }
+    
+    internal func postFormDataRequest(withUrl url: URL, data: Data, boundary: String, completion: @escaping BaseServiceCompletion) {
+        var request = createRequest(withUrl: url, forMethod: .post)
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        
+        executeRequest(request, completion: completion)
+    }
+
+    internal func putRequest(withUrl url: URL, item: Encodable, completion: @escaping BaseServiceCompletion) {
+        guard let data = item.toData() else {
+            completion(.failure(RequestError.ENCODE))
+            return
+        }
+        var request = createRequest(withUrl: url, forMethod: .patch)
+        request.httpBody = data
+        
+        executeRequest(request, completion: completion)
+    }
+    
+    internal func deleteRequest(withUrl url: URL, query: [String:String]? = nil, data: Data? = nil, completion: @escaping BaseServiceCompletion) {
+        var preparedUrl = url
+        if let query = query {
+            if var components = URLComponents(string: url.absoluteString) {
+                components.queryItems = query.map { param in
+                    URLQueryItem(name: param.key, value: "\(param.value)")
+                }
+                preparedUrl = components.url!
+            }
+        }
+        
+        var request = createRequest(withUrl: preparedUrl, forMethod: .delete)
+        
+        if let data = data {
+            request.httpBody = data
+        }
+        executeRequest(request, completion: completion)
+    }
+    
+    private var waitsForConnectivity: Bool = true
+    
+    private func executeRequest(_ request: URLRequest, completion: @escaping BaseServiceCompletion) {
+//        request.allowsCellularAccess = true
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity =  self.waitsForConnectivity
+        config.timeoutIntervalForRequest = 20.0
+        config.timeoutIntervalForResource = 20.0
+        config.allowsCellularAccess = true
+        let session = URLSession(configuration: config)
+        
+        session.dataTask(with: request, completionHandler: { data, response, error in
+            self.handleResponse(data: data, response: response, error: error, request: request, completion: completion)
+        }).resume()
+        
+        //create dataTask using the session object to send data to the server
+        /*URLSession.shared.configuration.waitsForConnectivity = true
+//        URLSession.shared.configuration.allowsCellularAccess = true
+        URLSession.shared.dataTask(with: request, completionHandler: { data, response, error in
+            self.handleResponse(data: data, response: response, error: error, request: request, completion: completion)
+        }).resume()*/
+    }
+    
+    private func handleResponse(data: Data?, response: URLResponse?, error: Error?, request: URLRequest, completion: @escaping BaseServiceCompletion) {
+        guard error == nil else {
+            self.waitsForConnectivity.toggle()
+            completion(.failure(error!))
+            return
+        }
+        
+        guard let data = data else {
+            completion(.failure(NSError(domain: "dataNilError", code: -100001, userInfo: nil)))
+            return
+        }
+        
+        if let resp = response as? HTTPURLResponse {
+            if resp.statusCode < 200 || resp.statusCode > 299 {
+                do {
+                    if let json = try JSONSerialization.jsonObject(with: data, options: .mutableContainers) as? [String: Any] {
+                        if let err = json["error"] as? [String: Any] {
+                            let msg = err["message"] as? String ?? "unknown_error"
+                            
+                            if msg == "REFRESH_TOKEN" {
+                                AppModule.provideAuthRepository().refreshToken { result in
+                                    switch result {
+                                        case .failure(let error):
+                                            completion(.failure(error))
+                                        case .success(_):
+                                            if request.httpMethod == HTTPMethod.post.rawValue {
+                                                self.postRequest(withUrl: request.url!, data: request.httpBody!, completion: completion)
+                                            } else if request.httpMethod == HTTPMethod.put.rawValue {
+                                                self.putRequest(withUrl: request.url!, item: request.httpBody, completion: completion)
+                                            } else if request.httpMethod == HTTPMethod.delete.rawValue {
+                                                self.deleteRequest(withUrl: request.url!, data: request.httpBody, completion: completion)
+                                            } else {
+                                                self.getRequest(withUrl: request.url!, completion: completion)
+                                            }
+                                    }
+                                }
+                            } else {
+                                completion(.failure(NSError(domain: msg, code: resp.statusCode, userInfo: json)))
+                            }
+                            return
+                        }
+                    }
+                }
+                catch {
+                    completion(.failure(NSError(domain: "unknown_error", code: 500, userInfo: nil)))
+                    return
+                }
+            }
+        }
+        
+        completion(.success(data))
+    }
+    
+    private func createRequest(withUrl url: URL, forMethod method: HTTPMethod) -> URLRequest {
+        
+        //now create the Request object using the url object
+        var request = URLRequest(url: url)
+        
+        request.httpMethod = method.rawValue //set http method as GET
+        
+        //HTTP Headers
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        
+        let authRepo = AppModule.provideAuthRepository()
+        request.addValue(authRepo.isLogged ? "Bearer \(authRepo.token)" : "NOT_LOGGED", forHTTPHeaderField: "Authorization")
+        request.addValue(UIDevice.current.identifierForVendor?.uuidString ?? "", forHTTPHeaderField: "Device_id")
+        
+        return request
+    }
+    
+    /*
+    internal func executePost(withUrl url: URL, andData data: Data?, parameters: Dictionary<String, Any>?, completion: @escaping (Data?, URLResponse?, Error?) -> ()) {
+        _executePostPut(method: .post, withUrl: url, andData: data, parameters: parameters, completion: completion)
+    }
+    
+    internal func executePut(withUrl url: URL, andData data: Data?, parameters: Dictionary<String, Any>?, completion: @escaping (Data?, URLResponse?, Error?) -> ()) {
+        _executePostPut(method: .put, withUrl: url, andData: data, parameters: parameters, completion: completion)
+    }
+    
+    fileprivate func _executePostPut(method: HTTPMethod, withUrl url: URL, andData data: Data?, parameters: Dictionary<String, Any>?, completion: @escaping (Data?, URLResponse?, Error?) -> ()) {
+      
+        var afRequest: DataRequest!
+        
+        if data != nil {
+            var request = URLRequest(url: url)
+            request.httpMethod = method.rawValue
+            request.httpBody = data!
+            request.allHTTPHeaderFields = prepareAuthHeaders()
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            afRequest = Alamofire.request(request)
+        }
+        else
+        {
+            afRequest = Alamofire.request(url,
+                method: method,
+                parameters: parameters,
+                encoding: JSONEncoding.default,
+                headers: prepareAuthHeaders()
+            )
+        }
+        
+        startStatusBarActivityIndicator()
+        
+        afRequest.response { (response) in
+            //debugPrint(response)
+            
+            self.stopStatusBarActivityIndicator()
+            
+            if let err = response.error {
+                //todo: Verificar internet connection
+                completion(response.data, response.response, err)
+            }
+            else {
+                self.handleResponse(response.response, data: response.data) { (data, fdgError) in
+                    if let err = fdgError {
+                        completion(data, response.response, err)
+                    }
+                    else if let data = data {
+                        completion(data, response.response, response.error)
+                    }
+                    else {
+                        #if DEBUG
+                        preconditionFailure("SHOULD NEVER COME HERE! RESPONSE IS NOT HTTP URL RESPONSE.")
+                        #else
+                        completion(nil, response.response, FDGError(by: .unknown))
+                        #endif
+                    }
+                }
+            }
+        }
+        
+        //URLSession.shared.dataTask(with: request, completionHandler: completion).resume()
+    }
+    
+    internal func executeUpload(withUrl url: URL, method: HTTPMethod = .put,  image: UIImage?, parameters:[String:String]? = nil, completion: @escaping (Data?, URLResponse?, Error?) -> ()) {
+        
+        var imgData: Data? = nil
+        
+        if let img = image
+        {
+            imgData = img.jpegData(compressionQuality: 0.5)!
+        }
+        //let imgData = image.pngData()!
+
+        //let parameters: [String:String] = [:]//["name": rname] //Optional for extra parameter
+
+        var headers = prepareAuthHeaders()!
+        headers["Content-type"] = "application/json"
+        headers["content-type"] = "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW"
+        
+        startStatusBarActivityIndicator()
+        //var req = Alamofire.upload(imgData, to: url, method: .put, headers: headers)
+
+        Alamofire.upload(multipartFormData: { multipartFormData in
+            
+                if imgData != nil
+                {
+                    multipartFormData.append(imgData!, withName: "file",fileName: "profile.jpeg", mimeType: "image/jpeg")
+                }
+            
+                if parameters != nil
+                {
+                    for (key, value) in parameters! {
+                        multipartFormData.append(value.data(using: .utf8)!, withName: key)
+                    } //Optional for extra parameters
+                }
+            },
+         to:url.absoluteString, method: method, headers: headers)
+        { (result) in
+            switch result {
+                case .success(let upload, _, _):
+                    
+                    self.stopStatusBarActivityIndicator()
+                    upload.uploadProgress(closure: { (progress) in
+                        //completion("\(progress.fractionCompleted)".data(using: .utf8), upload.response, nil)
+                        debugPrint("Upload Progress: \(progress.fractionCompleted)")
+                    })
+                    
+                    upload.responseString { (response) in
+                        if let err = response.error
+                        {
+                            debugPrint("UNHANDLED ERROR \(err)")
+                            return
+                        }
+                        //debugPrint(response.result.value as Any)
+                        self.handleResponse(response.response, data: response.data) { (data, fdgError) in
+                            if let err = fdgError
+                            {
+                                completion(nil, upload.response, err)
+                            }
+                            else
+                            {
+                                completion(data, upload.response, nil)
+                            }
+                        }
+                    }
+//                    upload.responseJSON { response in
+//                        if let err = response.error
+//                        {
+//                            debugPrint("UNHANDLED ERROR \(err)")
+//                            return
+//                        }
+//                        debugPrint(response.result.value as Any)
+//                        self.handleResponse(response.response, data: response.data) { (data, fdgError) in
+//                            if let err = fdgError
+//                            {
+//                                completion(nil, upload.response, err)
+//                            }
+//                            else
+//                            {
+//                                completion(nil, upload.response, nil)
+//                            }
+//                        }
+//                    }
+                
+            case .failure(let encodingError):
+                self.stopStatusBarActivityIndicator()
+                completion(nil, nil, encodingError)
+            }
+        }
+    }
+    
+    internal func executeGet(withUrl url: URL, completion: @escaping (Data?, URLResponse?, Error?) -> ()) {
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.allHTTPHeaderFields = prepareAuthHeaders()
+        
+        startStatusBarActivityIndicator()
+        
+        URLSession.shared.dataTask(with: request) { (data, response, error) in
+            
+            self.stopStatusBarActivityIndicator()
+            
+            if let err = error {
+                completion(data, response, err)
+            }
+            else {
+                self.handleResponse(response, data: data, completion: { (data, fdgError) in
+                    if let err = fdgError {
+                        completion(data, response, err)
+                    }
+                    else if let data = data {
+                        completion(data, response, nil)
+                        //completion(.success([School].listFromData(data)))
+                    }
+                    else {
+                        completion(nil, response, nil)
+//                        #if DEBUG
+//                        preconditionFailure("SHOULD NEVER COME HERE! RESPONSE IS NOT HTTP URL RESPONSE.")
+//                        #else
+//                        completion(nil, response, FDGError(by: .unknown))
+//                        #endif
+                    }
+                })
+            }
+        }.resume()
+    }
+    
+    internal func executeGet2(withUrl url: URL, completion: @escaping (Data?, URLResponse?, Error?) -> ()) {
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.allHTTPHeaderFields = prepareAuthHeaders()
+        
+        URLSession.shared.dataTask(with: request, completionHandler: completion).resume()
+    }
+    
+    fileprivate func prepareAuthHeaders() -> [String: String]? {
+        if let auth = BaseService.authToken {
+            return [
+                "access-token": auth.token,
+                "client": auth.client,
+                "uid": auth.uid
+            ]
+        }
+//        #if DEBUG //Until the opened routes be fixed
+//        return [
+//                "access-token": "vEGuI9mXDwZSL4qZko0wbA",
+//                "client": "VUMjVMWaSJx--dZ6HnlUJw",
+//                "uid": "teste@teste7.com"
+//            ]
+//        #else
+        return nil
+//        #endif
+    }
+    
+    func handledRequestError(_ error: Error)
+    {
+        
+    }
+    
+    // https://github.com/Alamofire/Alamofire/blob/master/Documentation/Usage.md#automatic-validation
+    internal func handleResponse(_ response: URLResponse?, data: Data?,  completion: @escaping (Data?, FDGError?) -> ())  {
+        
+        if let response = response as? HTTPURLResponse
+        {
+            let code = response.statusCode
+            //print("statusCode: \(code)")
+            
+            if (200...299).contains(code) { //, let dataString = String(data: data, encoding: .utf8)
+                completion(fixData(data), nil)
+            }
+            else {
+                
+                let fdgError = FDGError(type: FDGErrorType.unknown, code: code, serverBody: "")
+                do {
+                    fdgError.serverBody = try (JSONSerialization.jsonObject(with: data!, options: .allowFragments) as! [String: String])["error"] ?? ""
+                } catch {}
+                
+                switch code {
+                case 401:
+                    fdgError.type = FDGErrorType.unauthorized
+                case 422:
+                    fdgError.type = FDGErrorType.unprocessableEntity
+                case 504:
+                    fdgError.type = FDGErrorType.timeout
+                default:
+                    #if DEBUG
+                    //preconditionFailure("FIX THE UNKNOWN ERROR CODE: \(code)")
+                    #else
+                    #endif
+                }
+                
+                completion(data, fdgError)
+            }
+        }
+        else
+        {
+            #if DEBUG
+            preconditionFailure("SHOULD NEVER COME HERE! RESPONSE IS NOT HTTP URL RESPONSE.")
+            #else
+            completion(data, FDGError(by: .unknown))
+            #endif
+        }
+        
+    }
+    
+    fileprivate func fixData(_ data: Data?) -> Data? {
+        if data == nil {
+            return nil
+        }
+        
+        // Substitui os valores enviados pelo server em formato de string vazia por nulo para ser válido no cast de objetos opcionais.
+        if let str = String(data: data!, encoding: .utf8) {
+            let fixedStr = str.replacingOccurrences(of: "\"\",", with: "null,").replacingOccurrences(of: "{}", with: "null").replacingOccurrences(of: "[]", with: "null")
+            if fixedStr == "null"
+            {
+                return nil
+            }
+            else if let fixedData = fixedStr.data(using: .utf8) {
+                do {
+                    let jsonObj = try JSONSerialization.jsonObject(with: fixedData, options: [])
+                    if JSONSerialization.isValidJSONObject(jsonObj) {
+                        return fixedData
+                    }
+                }
+                catch {
+                    
+                }
+            }
+        }
+        //}
+        
+        return data
+    }
+    */
+    
+    /*
+    fileprivate func startStatusBarActivityIndicator() {
+        DispatchQueue.main.async {
+            UIApplication.shared.isNetworkActivityIndicatorVisible = true
+        }
+    }
+    
+    fileprivate func stopStatusBarActivityIndicator() {
+        DispatchQueue.main.async {
+            UIApplication.shared.isNetworkActivityIndicatorVisible = false
+        }
+    }
+    */
+}
